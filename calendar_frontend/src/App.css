@@ -298,9 +298,16 @@
   align-items: center;
   gap: 10px;
   padding-top: 8px;
+  border-top: 1px solid rgba(17,24,39,0.06);
 }
 .modal-footer .spacer {
   flex: 1;
+}
+.modal-footer .confirm-text {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 700;
+  margin-right: 6px;
 }
 
 .error {

@@ -295,6 +295,7 @@ function EventModal({
   const [allDay, setAllDay] = useState(Boolean(initialEvent?.allDay) || false)
   const [error, setError] = useState('')
   const firstFieldRef = useRef(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   useEffect(() => {
     if (isOpen) {
@@ -307,6 +308,7 @@ function EventModal({
       setStartTime(initialEvent?.startDateTime ? fromISOtoTime(initialEvent.startDateTime) : '09:00')
       setEndTime(initialEvent?.endDateTime ? fromISOtoTime(initialEvent.endDateTime) : '')
       setError('')
+      setConfirmDelete(false)
       setTimeout(() => firstFieldRef.current?.focus(), 0)
     }
   }, [isOpen, initialDate, initialEvent])
@@ -317,11 +319,19 @@ function EventModal({
       if (e.key === 'Escape') {
         e.preventDefault()
         onClose()
+      } else if (e.key === 'Enter') {
+        // Only trigger save when not confirming delete
+        if (!confirmDelete) {
+          const fake = { preventDefault() {} }
+          handleSubmit(fake)
+        }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [isOpen, onClose])
+    // include deps that affect submit validation
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, onClose, title, description, type, date, startTime, endTime, allDay, confirmDelete])
 
   if (!isOpen) return null
 
@@ -428,20 +438,47 @@ function EventModal({
 
           <div className="modal-footer">
             {onDelete && (
-              <button
-                type="button"
-                className="btn danger"
-                onClick={onDelete}
-                aria-label="Delete event"
-              >
-                Delete
-              </button>
+              <>
+                {!confirmDelete ? (
+                  <button
+                    type="button"
+                    className="btn danger"
+                    onClick={() => setConfirmDelete(true)}
+                    aria-label="Delete event"
+                  >
+                    Delete
+                  </button>
+                ) : (
+                  <>
+                    <span role="status" aria-live="polite" className="confirm-text">Confirm delete?</span>
+                    <button
+                      type="button"
+                      className="btn danger"
+                      onClick={() => {
+                        setConfirmDelete(false)
+                        onDelete()
+                      }}
+                      aria-label="Confirm delete event"
+                    >
+                      Yes, delete
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => setConfirmDelete(false)}
+                      aria-label="Cancel delete"
+                    >
+                      Cancel
+                    </button>
+                  </>
+                )}
+              </>
             )}
             <div className="spacer" />
-            <button type="button" className="btn ghost" onClick={onClose}>
+            <button type="button" className="btn ghost" onClick={onClose} aria-label="Cancel editing">
               Cancel
             </button>
-            <button type="submit" className="btn primary">
+            <button type="submit" className="btn primary" aria-label={initialEvent ? 'Save event' : 'Add event'}>
               {initialEvent ? 'Save' : 'Add'}
             </button>
           </div>
@@ -525,6 +562,7 @@ function CalendarGrid({
                         borderColor: meta.border,
                         color: meta.text,
                       }}
+                      aria-label={`${meta.label} ${ev.title} ${timeLabel}. Click to edit.`}
                     >
                       <span className="type-icon" title={meta.label}>{meta.icon}</span>
                       <span className="time">{timeLabel}</span>
@@ -575,7 +613,23 @@ function App() {
     if (!key) return
 
     if (editingEvent) {
-      updateEvent(key, editingEvent.id, payload)
+      // Handle possible date change: move across date buckets while preserving id
+      const oldKey = editingEvent.startDateTime
+        ? `${new Date(editingEvent.startDateTime).getFullYear()}-${pad2(new Date(editingEvent.startDateTime).getMonth()+1)}-${pad2(new Date(editingEvent.startDateTime).getDate())}`
+        : (modalDate ? formatDateKey(modalDate) : key)
+
+      if (oldKey !== key) {
+        // remove from old bucket
+        deleteEvent(oldKey, editingEvent.id)
+        // add in new bucket with same id to preserve identity
+        const next = { ...eventsByDate }
+        const list = next[key] ? [...next[key]] : []
+        list.push({ ...payload, id: editingEvent.id })
+        next[key] = list
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)) } catch {}
+      } else {
+        updateEvent(key, editingEvent.id, payload)
+      }
     } else {
       addEvent(key, payload)
     }
@@ -583,10 +637,11 @@ function App() {
   }
 
   const handleDelete = () => {
-    if (!editingEvent || !modalDate) return
+    if (!editingEvent) return
     const key = editingEvent.startDateTime
       ? `${new Date(editingEvent.startDateTime).getFullYear()}-${pad2(new Date(editingEvent.startDateTime).getMonth()+1)}-${pad2(new Date(editingEvent.startDateTime).getDate())}`
-      : formatDateKey(modalDate)
+      : (modalDate ? formatDateKey(modalDate) : '')
+    if (!key) return
     deleteEvent(key, editingEvent.id)
     setModalOpen(false)
   }

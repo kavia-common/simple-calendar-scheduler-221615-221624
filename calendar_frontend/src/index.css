@@ -92,9 +92,13 @@ button {
 .btn.ghost {
   border-color: rgba(17,24,39,0.12);
   background: #fff;
+  color: var(--text);
 }
-.btn.ghost:hover {
+.btn.ghost:hover,
+.btn.ghost:focus {
   border-color: rgba(17,24,39,0.22);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(17,24,39,0.08);
 }
 .btn.danger {
   background: var(--error);
