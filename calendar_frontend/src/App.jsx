@@ -4,26 +4,44 @@ import './index.css'
 import './App.css'
 
 /**
- * Local storage helpers
+ * Local storage helpers with migration
  */
-const STORAGE_KEY = 'calendar_events_v1'
+const STORAGE_KEY = 'calendar_events_v2' // bump storage key for new schema
+const LEGACY_KEYS = ['calendar_events_v1']
 
-function loadEvents() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? JSON.parse(raw) : {}
-  } catch {
-    return {}
-  }
+/**
+ * Event color mapping for Ocean Professional theme
+ */
+const TYPE_META = {
+  meeting: {
+    color: '#2563EB',
+    bg: 'rgba(37,99,235,0.10)',
+    border: 'rgba(37,99,235,0.35)',
+    text: '#1e3a8a',
+    icon: '👥',
+    label: 'Meeting',
+  },
+  reminder: {
+    color: '#F59E0B',
+    bg: 'rgba(245,158,11,0.14)',
+    border: 'rgba(245,158,11,0.45)',
+    text: '#7c2d12',
+    icon: '⏰',
+    label: 'Reminder',
+  },
+  task: {
+    color: '#6b7280',
+    bg: 'rgba(107,114,128,0.14)',
+    border: 'rgba(107,114,128,0.35)',
+    text: '#374151',
+    icon: '✔️',
+    label: 'Task',
+  },
 }
 
-function saveEvents(eventsByDate) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(eventsByDate))
-  } catch {
-    // ignore
-  }
-}
+/**
+ * Utilities
+ */
 
 // PUBLIC_INTERFACE
 function formatDateKey(date) {
@@ -53,33 +71,117 @@ function getMonthGrid(date) {
   const startDay = start.getDay() // 0-6 (Sun-Sat)
   const daysInMonth = end.getDate()
 
-  // Compute leading days (from previous month)
-  const leading = startDay // number of leading empty cells
+  const leading = startDay
   const totalCells = 42
   const grid = []
 
-  // Previous month end
-  const prevMonthEnd = new Date(date.getFullYear(), date.getMonth(), 0) // Last day of prev month
+  const prevMonthEnd = new Date(date.getFullYear(), date.getMonth(), 0)
   const prevMonthDays = prevMonthEnd.getDate()
 
-  // Fill leading
   for (let i = leading - 1; i >= 0; i--) {
     const day = prevMonthDays - i
     grid.push(new Date(date.getFullYear(), date.getMonth() - 1, day))
   }
-
-  // Fill current month
   for (let d = 1; d <= daysInMonth; d++) {
     grid.push(new Date(date.getFullYear(), date.getMonth(), d))
   }
-
-  // Fill trailing to complete 42
   const trailing = totalCells - grid.length
   for (let d = 1; d <= trailing; d++) {
     grid.push(new Date(date.getFullYear(), date.getMonth() + 1, d))
   }
-
   return grid
+}
+
+/**
+ * Schema:
+ * id, title, description, type ("meeting"|"reminder"|"task"),
+ * startDateTime (ISO local), endDateTime? (ISO local), allDay? (boolean, default false), color derived from type
+ */
+
+function parseLegacy(recordsByDate) {
+  // Legacy structure: { 'YYYY-MM-DD': [ { id?, title, desc, start, end } ] }
+  const migrated = {}
+  for (const [dateKey, list] of Object.entries(recordsByDate || {})) {
+    const nextList = (list || []).map((ev) => {
+      const id = ev.id || crypto.randomUUID()
+      const title = ev.title ?? ''
+      const description = ev.desc ?? ''
+      const start = ev.start || '00:00'
+      const end = ev.end || ''
+      const type = 'task'
+      const allDay = false
+      const startDateTime = toLocalISO(dateKey, start)
+      const endDateTime = end ? toLocalISO(dateKey, end) : undefined
+      return { id, title, description, type, startDateTime, endDateTime, allDay }
+    })
+    if (nextList.length) migrated[dateKey] = nextList
+  }
+  return migrated
+}
+
+function loadEvents() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) return JSON.parse(raw)
+
+    // Try legacy keys and migrate
+    for (const k of LEGACY_KEYS) {
+      const legacyRaw = localStorage.getItem(k)
+      if (legacyRaw) {
+        const legacy = JSON.parse(legacyRaw)
+        const migrated = parseLegacy(legacy)
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated))
+        return migrated
+      }
+    }
+    return {}
+  } catch {
+    return {}
+  }
+}
+
+function saveEvents(eventsByDate) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(eventsByDate))
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Time helpers (timezone-safe local handling)
+ */
+function pad2(n) {
+  return String(n).padStart(2, '0')
+}
+
+function toLocalISO(dateKey, timeHHMM) {
+  // Constructs ISO string using local time, not UTC adjusted.
+  const [year, month, day] = dateKey.split('-').map(Number)
+  let h = 0, m = 0
+  if (timeHHMM) {
+    const [hh, mm] = timeHHMM.split(':')
+    h = Number(hh) || 0
+    m = Number(mm) || 0
+  }
+  const d = new Date(year, month - 1, day, h, m, 0, 0)
+  // Build ISO without timezone shift by constructing from local components
+  const iso = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:00`
+  return iso
+}
+
+function fromISOtoTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+
+function sortByStart(a, b) {
+  if (a.allDay && !b.allDay) return -1
+  if (!a.allDay && b.allDay) return 1
+  const ta = a.startDateTime || ''
+  const tb = b.startDateTime || ''
+  return ta.localeCompare(tb)
 }
 
 function useEvents() {
@@ -122,22 +224,52 @@ function useEvents() {
 }
 
 /**
- * Header with month navigation
+ * Header with month navigation and type filter chips
  */
-function Header({ currentMonth, onPrev, onNext }) {
+function Header({ currentMonth, onPrev, onNext, filters, onToggle }) {
   const monthFormatter = useMemo(
     () => new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }),
     []
   )
+  const chips = [
+    { key: 'meeting', meta: TYPE_META.meeting },
+    { key: 'reminder', meta: TYPE_META.reminder },
+    { key: 'task', meta: TYPE_META.task },
+  ]
   return (
     <header className="header surface shadow">
       <button aria-label="Previous month" className="icon-btn" onClick={onPrev}>
         ‹
       </button>
-      <h1 className="title">{monthFormatter.format(currentMonth)}</h1>
+      <div className="title">
+        {monthFormatter.format(currentMonth)}
+      </div>
       <button aria-label="Next month" className="icon-btn" onClick={onNext}>
         ›
       </button>
+
+      <div className="filters">
+        <span className="legend-label">Show:</span>
+        {chips.map(c => {
+          const active = filters[c.key]
+          return (
+            <button
+              key={c.key}
+              className={`chip filter ${active ? 'active' : ''}`}
+              onClick={() => onToggle(c.key)}
+              title={`${active ? 'Hide' : 'Show'} ${c.meta.label}s`}
+              style={{
+                borderColor: active ? c.meta.border : 'rgba(17,24,39,0.15)',
+                background: active ? c.meta.bg : '#fff',
+                color: active ? c.meta.text : 'inherit',
+              }}
+            >
+              <span className="dot" style={{ background: c.meta.color }} />
+              {c.meta.icon} {c.meta.label}
+            </button>
+          )
+        })}
+      </div>
     </header>
   )
 }
@@ -153,22 +285,31 @@ function EventModal({
   initialDate,
   initialEvent,
 }) {
+  const dateKey = initialDate ? formatDateKey(initialDate) : ''
   const [title, setTitle] = useState(initialEvent?.title || '')
-  const [desc, setDesc] = useState(initialEvent?.desc || '')
-  const [start, setStart] = useState(initialEvent?.start || '09:00')
-  const [end, setEnd] = useState(initialEvent?.end || '10:00')
-  const dialogRef = useRef(null)
+  const [description, setDescription] = useState(initialEvent?.description || '')
+  const [type, setType] = useState(initialEvent?.type || 'task')
+  const [date, setDate] = useState(dateKey)
+  const [startTime, setStartTime] = useState(initialEvent?.startDateTime ? fromISOtoTime(initialEvent.startDateTime) : '09:00')
+  const [endTime, setEndTime] = useState(initialEvent?.endDateTime ? fromISOtoTime(initialEvent.endDateTime) : '')
+  const [allDay, setAllDay] = useState(Boolean(initialEvent?.allDay) || false)
+  const [error, setError] = useState('')
   const firstFieldRef = useRef(null)
 
   useEffect(() => {
     if (isOpen) {
+      const dk = initialDate ? formatDateKey(initialDate) : ''
+      setDate(dk)
       setTitle(initialEvent?.title || '')
-      setDesc(initialEvent?.desc || '')
-      setStart(initialEvent?.start || '09:00')
-      setEnd(initialEvent?.end || '10:00')
+      setDescription(initialEvent?.description || '')
+      setType(initialEvent?.type || 'task')
+      setAllDay(Boolean(initialEvent?.allDay) || false)
+      setStartTime(initialEvent?.startDateTime ? fromISOtoTime(initialEvent.startDateTime) : '09:00')
+      setEndTime(initialEvent?.endDateTime ? fromISOtoTime(initialEvent.endDateTime) : '')
+      setError('')
       setTimeout(() => firstFieldRef.current?.focus(), 0)
     }
-  }, [isOpen, initialEvent])
+  }, [isOpen, initialDate, initialEvent])
 
   useEffect(() => {
     function onKey(e) {
@@ -184,20 +325,40 @@ function EventModal({
 
   if (!isOpen) return null
 
+  const validate = () => {
+    if (!title.trim()) return 'Title is required'
+    if (!date) return 'Date is required'
+    if (!allDay && !startTime) return 'Start time is required'
+    if (startTime && endTime) {
+      const s = toLocalISO(date, startTime)
+      const e = toLocalISO(date, endTime)
+      if (e < s) return 'End time must be after start time'
+    }
+    return ''
+  }
+
   const handleSubmit = (e) => {
     e.preventDefault()
-    if (!title.trim()) return
+    const err = validate()
+    if (err) {
+      setError(err)
+      return
+    }
+    const startDateTime = allDay ? toLocalISO(date, '00:00') : toLocalISO(date, startTime)
+    const endDateTime = endTime ? toLocalISO(date, endTime) : undefined
     onSave({
       title: title.trim(),
-      desc: desc.trim(),
-      start,
-      end,
+      description: description.trim(),
+      type,
+      startDateTime,
+      endDateTime,
+      allDay,
     })
   }
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Event editor">
-      <div ref={dialogRef} className="modal surface shadow">
+      <div className="modal surface shadow">
         <div className="modal-header">
           <h2 className="modal-title">
             {initialEvent ? 'Edit Event' : 'Add Event'}
@@ -214,38 +375,57 @@ function EventModal({
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Event title"
+              required
             />
           </div>
+
+          <div className="row">
+            <div className="field">
+              <label htmlFor="type">Type</label>
+              <select id="type" value={type} onChange={(e) => setType(e.target.value)}>
+                <option value="meeting">Meeting</option>
+                <option value="reminder">Reminder</option>
+                <option value="task">Task</option>
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="date">Date</label>
+              <input id="date" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
+            </div>
+          </div>
+
+          <div className="row">
+            <div className="field">
+              <label htmlFor="start">Start Time</label>
+              <input id="start" type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} disabled={allDay} required={!allDay} />
+            </div>
+            <div className="field">
+              <label htmlFor="end">End Time (optional)</label>
+              <input id="end" type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} disabled={allDay} />
+            </div>
+          </div>
+
+          <div className="field toggle">
+            <label htmlFor="allday">All-day</label>
+            <div className="toggle-wrap">
+              <input id="allday" type="checkbox" checked={allDay} onChange={(e) => setAllDay(e.target.checked)} />
+              <span className="hint">No time range when enabled</span>
+            </div>
+          </div>
+
           <div className="field">
-            <label htmlFor="desc">Notes</label>
+            <label htmlFor="desc">Description</label>
             <textarea
               id="desc"
-              value={desc}
-              onChange={(e) => setDesc(e.target.value)}
-              placeholder="Optional notes"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Optional description"
               rows={3}
             />
           </div>
-          <div className="row">
-            <div className="field">
-              <label htmlFor="start">Start</label>
-              <input
-                id="start"
-                type="time"
-                value={start}
-                onChange={(e) => setStart(e.target.value)}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="end">End</label>
-              <input
-                id="end"
-                type="time"
-                value={end}
-                onChange={(e) => setEnd(e.target.value)}
-              />
-            </div>
-          </div>
+
+          {error && <div className="error">{error}</div>}
+
           <div className="modal-footer">
             {onDelete && (
               <button
@@ -279,6 +459,7 @@ function CalendarGrid({
   eventsByDate,
   onDayClick,
   onEventClick,
+  filters,
 }) {
   const grid = useMemo(() => getMonthGrid(monthDate), [monthDate])
   const month = monthDate.getMonth()
@@ -295,7 +476,10 @@ function CalendarGrid({
         {grid.map((d, i) => {
           const key = formatDateKey(d)
           const inMonth = d.getMonth() === month
-          const dayEvents = eventsByDate[key] || []
+          const dayEvents = (eventsByDate[key] || [])
+            .filter(ev => filters[ev.type] !== false)
+            .slice()
+            .sort(sortByStart)
 
           return (
             <div
@@ -321,21 +505,34 @@ function CalendarGrid({
                 </button>
               </div>
               <div className="events">
-                {dayEvents.map(ev => (
-                  <button
-                    key={ev.id}
-                    className="event chip"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onEventClick(d, ev)
-                    }}
-                    title={`${ev.start} - ${ev.end} ${ev.title}`}
-                  >
-                    <span className="time">{ev.start}</span>
-                    <span className="sep">•</span>
-                    <span className="label">{ev.title}</span>
-                  </button>
-                ))}
+                {dayEvents.map(ev => {
+                  const meta = TYPE_META[ev.type] || TYPE_META.task
+                  const startLabel = ev.allDay ? 'All day' : (ev.startDateTime ? fromISOtoTime(ev.startDateTime) : '')
+                  const endLabel = (!ev.allDay && ev.endDateTime) ? fromISOtoTime(ev.endDateTime) : ''
+                  const timeLabel = ev.allDay ? 'All day' : `${startLabel}${endLabel ? `–${endLabel}` : ''}`
+                  const titleAttr = `${meta.label} ${timeLabel} ${ev.title}`
+                  return (
+                    <button
+                      key={ev.id}
+                      className="event chip"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onEventClick(d, ev)
+                      }}
+                      title={titleAttr}
+                      style={{
+                        background: `linear-gradient(90deg, ${meta.bg}, rgba(255,255,255,0.96))`,
+                        borderColor: meta.border,
+                        color: meta.text,
+                      }}
+                    >
+                      <span className="type-icon" title={meta.label}>{meta.icon}</span>
+                      <span className="time">{timeLabel}</span>
+                      <span className="sep">•</span>
+                      <span className="label">{ev.title}</span>
+                    </button>
+                  )
+                })}
               </div>
             </div>
           )
@@ -351,6 +548,7 @@ function App() {
   const [modalOpen, setModalOpen] = useState(false)
   const [modalDate, setModalDate] = useState(null)
   const [editingEvent, setEditingEvent] = useState(null)
+  const [filters, setFilters] = useState({ meeting: true, reminder: true, task: true })
 
   useTizenKeys({
     onLeft: () => setMonthDate(d => addMonths(d, -1)),
@@ -371,7 +569,11 @@ function App() {
   }
 
   const handleSave = (payload) => {
-    const key = formatDateKey(modalDate)
+    const key = payload.startDateTime
+      ? `${new Date(payload.startDateTime).getFullYear()}-${pad2(new Date(payload.startDateTime).getMonth()+1)}-${pad2(new Date(payload.startDateTime).getDate())}`
+      : (modalDate ? formatDateKey(modalDate) : '')
+    if (!key) return
+
     if (editingEvent) {
       updateEvent(key, editingEvent.id, payload)
     } else {
@@ -382,8 +584,15 @@ function App() {
 
   const handleDelete = () => {
     if (!editingEvent || !modalDate) return
-    deleteEvent(formatDateKey(modalDate), editingEvent.id)
+    const key = editingEvent.startDateTime
+      ? `${new Date(editingEvent.startDateTime).getFullYear()}-${pad2(new Date(editingEvent.startDateTime).getMonth()+1)}-${pad2(new Date(editingEvent.startDateTime).getDate())}`
+      : formatDateKey(modalDate)
+    deleteEvent(key, editingEvent.id)
     setModalOpen(false)
+  }
+
+  const toggleFilter = (key) => {
+    setFilters(f => ({ ...f, [key]: !f[key] }))
   }
 
   return (
@@ -392,6 +601,8 @@ function App() {
         currentMonth={monthDate}
         onPrev={() => setMonthDate(d => addMonths(d, -1))}
         onNext={() => setMonthDate(d => addMonths(d, 1))}
+        filters={filters}
+        onToggle={toggleFilter}
       />
       <main className="main">
         <CalendarGrid
@@ -399,6 +610,7 @@ function App() {
           eventsByDate={eventsByDate}
           onDayClick={openNewEventModal}
           onEventClick={openEditEventModal}
+          filters={filters}
         />
       </main>
 
