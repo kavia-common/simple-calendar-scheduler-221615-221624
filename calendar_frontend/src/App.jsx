@@ -6,8 +6,12 @@ import './App.css'
 /**
  * Local storage helpers with migration
  */
-const STORAGE_KEY = 'calendar_events_v2' // bump storage key for new schema
-const LEGACY_KEYS = ['calendar_events_v1']
+const STORAGE_KEY = 'calendar_events_v3' // bump for reminder schema
+const LEGACY_KEYS = ['calendar_events_v2', 'calendar_events_v1']
+
+// Keys for reminder preferences and dedupe persistence
+const STORAGE_GLOBAL_REMINDERS = 'calendar_global_reminders_enabled'
+const STORAGE_LAST_NOTIFIED = 'calendar_last_notified_map' // { [eventId]: timestamp }
 
 /**
  * Event color mapping for Ocean Professional theme
@@ -95,7 +99,8 @@ function getMonthGrid(date) {
 /**
  * Schema:
  * id, title, description, type ("meeting"|"reminder"|"task"),
- * startDateTime (ISO local), endDateTime? (ISO local), allDay? (boolean, default false), color derived from type
+ * startDateTime (ISO local), endDateTime? (ISO local), allDay? (boolean, default false),
+ * reminderEnabled? (boolean), reminderMinutesBefore? (number; 5/10/15/30/60, default 10)
  */
 
 function parseLegacy(recordsByDate) {
@@ -108,15 +113,34 @@ function parseLegacy(recordsByDate) {
       const description = ev.desc ?? ''
       const start = ev.start || '00:00'
       const end = ev.end || ''
-      const type = 'task'
-      const allDay = false
+      const type = ev.type || 'task'
+      const allDay = Boolean(ev.allDay) || false
       const startDateTime = toLocalISO(dateKey, start)
       const endDateTime = end ? toLocalISO(dateKey, end) : undefined
-      return { id, title, description, type, startDateTime, endDateTime, allDay }
+      const reminderEnabled = ev.reminderEnabled ?? true
+      const reminderMinutesBefore = normalizeReminderMinutes(ev.reminderMinutesBefore)
+      return {
+        id,
+        title,
+        description,
+        type,
+        startDateTime,
+        endDateTime,
+        allDay,
+        reminderEnabled,
+        reminderMinutesBefore,
+      }
     })
     if (nextList.length) migrated[dateKey] = nextList
   }
   return migrated
+}
+
+function normalizeReminderMinutes(val) {
+  const allowed = [5, 10, 15, 30, 60]
+  const n = Number(val)
+  if (allowed.includes(n)) return n
+  return 10
 }
 
 function loadEvents() {
@@ -194,7 +218,12 @@ function useEvents() {
   const addEvent = (dateKey, event) => {
     setEventsByDate(prev => {
       const list = prev[dateKey] ? [...prev[dateKey]] : []
-      const withId = { ...event, id: crypto.randomUUID() }
+      // default reminder settings for new events
+      const withDefaults = {
+        reminderEnabled: event.reminderEnabled ?? true,
+        reminderMinutesBefore: normalizeReminderMinutes(event.reminderMinutesBefore),
+      }
+      const withId = { ...{ reminderMinutesBefore: 10 }, ...event, ...withDefaults, id: crypto.randomUUID() }
       const next = { ...prev, [dateKey]: [...list, withId] }
       return next
     })
@@ -205,7 +234,14 @@ function useEvents() {
       const list = prev[dateKey] ? [...prev[dateKey]] : []
       const idx = list.findIndex(e => e.id === eventId)
       if (idx === -1) return prev
-      list[idx] = { ...list[idx], ...updates }
+      const normalized = { ...updates }
+      if ('reminderMinutesBefore' in normalized) {
+        normalized.reminderMinutesBefore = normalizeReminderMinutes(normalized.reminderMinutesBefore)
+      }
+      if ('reminderEnabled' in normalized) {
+        normalized.reminderEnabled = Boolean(normalized.reminderEnabled)
+      }
+      list[idx] = { ...{ reminderEnabled: true, reminderMinutesBefore: 10 }, ...list[idx], ...normalized }
       return { ...prev, [dateKey]: list }
     })
   }
@@ -224,9 +260,9 @@ function useEvents() {
 }
 
 /**
- * Header with month navigation and type filter chips
+ * Header with month navigation, type filter chips, and global reminders toggle
  */
-function Header({ currentMonth, onPrev, onNext, filters, onToggle }) {
+function Header({ currentMonth, onPrev, onNext, filters, onToggle, remindersEnabled, onToggleReminders }) {
   const monthFormatter = useMemo(
     () => new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }),
     []
@@ -244,9 +280,33 @@ function Header({ currentMonth, onPrev, onNext, filters, onToggle }) {
       <div className="title">
         {monthFormatter.format(currentMonth)}
       </div>
-      <button aria-label="Next month" className="icon-btn" onClick={onNext}>
-        ›
-      </button>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+        <div className="bell-wrap">
+          <button
+            aria-label={remindersEnabled ? 'Disable reminders' : 'Enable reminders'}
+            className={`bell-btn ${remindersEnabled ? 'on' : 'off'}`}
+            onClick={onToggleReminders}
+            title={`${remindersEnabled ? 'Disable' : 'Enable'} reminders`}
+          >
+            {remindersEnabled ? '🔔' : '🔕'}
+          </button>
+          <div className="bell-dropdown">
+            <div className="bell-row">
+              <span>Reminders</span>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={remindersEnabled}
+                  onChange={onToggleReminders}
+                  aria-label="Toggle reminders globally"
+                />
+                <span className="slider" />
+              </label>
+            </div>
+            <div className="bell-hint">Alert before events across sessions</div>
+          </div>
+        </div>
+      </div>
 
       <div className="filters">
         <span className="legend-label">Show:</span>
@@ -297,6 +357,14 @@ function EventModal({
   const firstFieldRef = useRef(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
+  // Reminder fields
+  const [reminderEnabled, setReminderEnabled] = useState(
+    initialEvent?.reminderEnabled ?? true
+  )
+  const [reminderMinutesBefore, setReminderMinutesBefore] = useState(
+    normalizeReminderMinutes(initialEvent?.reminderMinutesBefore)
+  )
+
   useEffect(() => {
     if (isOpen) {
       const dk = initialDate ? formatDateKey(initialDate) : ''
@@ -309,6 +377,10 @@ function EventModal({
       setEndTime(initialEvent?.endDateTime ? fromISOtoTime(initialEvent.endDateTime) : '')
       setError('')
       setConfirmDelete(false)
+
+      setReminderEnabled(initialEvent?.reminderEnabled ?? true)
+      setReminderMinutesBefore(normalizeReminderMinutes(initialEvent?.reminderMinutesBefore))
+
       setTimeout(() => firstFieldRef.current?.focus(), 0)
     }
   }, [isOpen, initialDate, initialEvent])
@@ -329,9 +401,8 @@ function EventModal({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-    // include deps that affect submit validation
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, onClose, title, description, type, date, startTime, endTime, allDay, confirmDelete])
+  }, [isOpen, onClose, title, description, type, date, startTime, endTime, allDay, confirmDelete, reminderEnabled, reminderMinutesBefore])
 
   if (!isOpen) return null
 
@@ -343,6 +414,12 @@ function EventModal({
       const s = toLocalISO(date, startTime)
       const e = toLocalISO(date, endTime)
       if (e < s) return 'End time must be after start time'
+    }
+    if (reminderEnabled) {
+      const allowed = [5, 10, 15, 30, 60]
+      if (!allowed.includes(Number(reminderMinutesBefore))) {
+        return 'Invalid reminder minutes'
+      }
     }
     return ''
   }
@@ -363,6 +440,8 @@ function EventModal({
       startDateTime,
       endDateTime,
       allDay,
+      reminderEnabled,
+      reminderMinutesBefore: normalizeReminderMinutes(reminderMinutesBefore),
     })
   }
 
@@ -420,6 +499,34 @@ function EventModal({
             <div className="toggle-wrap">
               <input id="allday" type="checkbox" checked={allDay} onChange={(e) => setAllDay(e.target.checked)} />
               <span className="hint">No time range when enabled</span>
+            </div>
+          </div>
+
+          <div className="row">
+            <div className="field">
+              <label>Reminder</label>
+              <div className="toggle-wrap">
+                <input
+                  id="reminderEnabled"
+                  type="checkbox"
+                  checked={reminderEnabled}
+                  onChange={(e) => setReminderEnabled(e.target.checked)}
+                />
+                <span className="hint">Enable alert before start</span>
+              </div>
+            </div>
+            <div className="field">
+              <label htmlFor="reminderMinutes">Minutes before</label>
+              <select
+                id="reminderMinutes"
+                value={reminderMinutesBefore}
+                onChange={(e) => setReminderMinutesBefore(Number(e.target.value))}
+                disabled={!reminderEnabled}
+              >
+                {[5, 10, 15, 30, 60].map(m => (
+                  <option key={m} value={m}>{m} minutes</option>
+                ))}
+              </select>
             </div>
           </div>
 
@@ -580,6 +687,23 @@ function CalendarGrid({
   )
 }
 
+function readLastNotifiedMap() {
+  try {
+    const raw = localStorage.getItem(STORAGE_LAST_NOTIFIED)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return typeof parsed === 'object' && parsed ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeLastNotifiedMap(map) {
+  try {
+    localStorage.setItem(STORAGE_LAST_NOTIFIED, JSON.stringify(map))
+  } catch { /* ignore */ }
+}
+
 function App() {
   const [monthDate, setMonthDate] = useState(startOfMonth(new Date()))
   const { eventsByDate, addEvent, updateEvent, deleteEvent } = useEvents()
@@ -587,6 +711,18 @@ function App() {
   const [modalDate, setModalDate] = useState(null)
   const [editingEvent, setEditingEvent] = useState(null)
   const [filters, setFilters] = useState({ meeting: true, reminder: true, task: true })
+
+  // Global reminders enabled
+  const [remindersEnabled, setRemindersEnabled] = useState(() => {
+    const raw = localStorage.getItem(STORAGE_GLOBAL_REMINDERS)
+    if (raw === null) return true
+    return raw === 'true'
+  })
+
+  // Toast state
+  const [toasts, setToasts] = useState([]) // [{id, eventId, title, timeLabel, type, color}]
+  const notifiedIdsRef = useRef(new Set()) // in-session dedupe
+  const lastNotifiedMapRef = useRef(readLastNotifiedMap())
 
   useTizenKeys({
     onLeft: () => setMonthDate(d => addMonths(d, -1)),
@@ -650,6 +786,120 @@ function App() {
     setFilters(f => ({ ...f, [key]: !f[key] }))
   }
 
+  const toggleReminders = () => {
+    setRemindersEnabled(prev => {
+      const next = !prev
+      try { localStorage.setItem(STORAGE_GLOBAL_REMINDERS, String(next)) } catch {}
+      return next
+    })
+  }
+
+  // Build flat list of future events for scheduler
+  const flatEvents = useMemo(() => {
+    const arr = []
+    const now = new Date()
+    Object.entries(eventsByDate).forEach(([dateKey, list]) => {
+      for (const ev of list || []) {
+        // Allow reminders for meetings/tasks/reminders by default
+        // Skip events with no start or in the past (start < now)
+        if (!ev.startDateTime) continue
+        const start = new Date(ev.startDateTime)
+        if (isNaN(start.getTime())) continue
+        // Only consider future or upcoming events (including those within reminder window)
+        if (start.getTime() < now.getTime()) continue
+        const reminderEnabled = ev.reminderEnabled ?? true
+        const reminderMinutesBefore = normalizeReminderMinutes(ev.reminderMinutesBefore)
+        arr.push({
+          ...ev,
+          dateKey,
+          reminderEnabled,
+          reminderMinutesBefore,
+        })
+      }
+    })
+    return arr
+  }, [eventsByDate])
+
+  // Scheduler scanning every 30s
+  useEffect(() => {
+    function tick() {
+      if (!remindersEnabled) return
+      const now = new Date()
+      const lastNotified = lastNotifiedMapRef.current || {}
+
+      for (const ev of flatEvents) {
+        if (!ev.reminderEnabled) continue
+        const start = new Date(ev.startDateTime)
+        const remindMs = (ev.reminderMinutesBefore ?? 10) * 60 * 1000
+        const triggerAt = new Date(start.getTime() - remindMs)
+
+        if (now.getTime() >= triggerAt.getTime()) {
+          // Deduping: per-session and persisted
+          if (notifiedIdsRef.current.has(ev.id)) continue
+          const lastTs = lastNotified[ev.id]
+          if (lastTs) {
+            // If previously notified inside this same window (triggerAt..start), skip
+            const lastDate = new Date(lastTs)
+            if (lastDate.getTime() >= triggerAt.getTime() && lastDate.getTime() <= start.getTime()) {
+              continue
+            }
+          }
+
+          // Trigger toast
+          const meta = TYPE_META[ev.type] || TYPE_META.task
+          const startLabel = ev.allDay ? 'All day' : (ev.startDateTime ? fromISOtoTime(ev.startDateTime) : '')
+          const toastId = `${ev.id}-${Date.now()}`
+          setToasts(prev => [
+            ...prev,
+            {
+              id: toastId,
+              eventId: ev.id,
+              title: ev.title,
+              type: ev.type,
+              color: meta.color,
+              timeLabel: ev.allDay ? 'All day' : startLabel,
+              dateKey: ev.dateKey,
+            },
+          ])
+
+          // Mark as notified
+          notifiedIdsRef.current.add(ev.id)
+          const updated = { ...lastNotified, [ev.id]: new Date().toISOString() }
+          lastNotifiedMapRef.current = updated
+          writeLastNotifiedMap(updated)
+        }
+      }
+    }
+
+    // initial check quickly, then every 30s
+    const initialTimer = setTimeout(tick, 300)
+    const interval = setInterval(tick, 30000)
+    return () => {
+      clearTimeout(initialTimer)
+      clearInterval(interval)
+    }
+  }, [flatEvents, remindersEnabled])
+
+  const dismissToast = (tid) => {
+    setToasts(prev => prev.filter(t => t.id !== tid))
+  }
+
+  const openEventFromToast = (toast) => {
+    // find event by id to open editor
+    const lists = Object.entries(eventsByDate)
+    for (const [dk, list] of lists) {
+      const ev = (list || []).find(e => e.id === toast.eventId)
+      if (ev) {
+        setModalDate(new Date(ev.startDateTime))
+        setEditingEvent(ev)
+        setModalOpen(true)
+        break
+      }
+    }
+    // also dismiss toast
+    dismissToast(toast.id)
+  }
+
   return (
     <div className="app-root">
       <Header
@@ -658,6 +908,8 @@ function App() {
         onNext={() => setMonthDate(d => addMonths(d, 1))}
         filters={filters}
         onToggle={toggleFilter}
+        remindersEnabled={remindersEnabled}
+        onToggleReminders={toggleReminders}
       />
       <main className="main">
         <CalendarGrid
@@ -668,6 +920,31 @@ function App() {
           filters={filters}
         />
       </main>
+
+      {/* Toast container */}
+      <div className="toast-container">
+        {toasts.map(t => {
+          const meta = TYPE_META[t.type] || TYPE_META.task
+          return (
+            <div key={t.id} className="toast shadow" style={{ borderLeftColor: meta.color }}>
+              <div className="toast-icon" aria-hidden="true">{meta.icon}</div>
+              <div className="toast-body">
+                <div className="toast-title">{t.title}</div>
+                <div className="toast-sub">
+                  <span className="dot" style={{ background: meta.color }} />
+                  <span className="toast-type">{meta.label}</span>
+                  <span className="toast-sep">•</span>
+                  <span className="toast-time">{t.timeLabel}</span>
+                </div>
+              </div>
+              <div className="toast-actions">
+                <button className="btn ghost sm" onClick={() => dismissToast(t.id)}>Dismiss</button>
+                <button className="btn primary sm" onClick={() => openEventFromToast(t)}>Open Event</button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
 
       <EventModal
         isOpen={modalOpen}

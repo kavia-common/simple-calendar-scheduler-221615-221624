@@ -124,7 +124,7 @@ input:focus, textarea:focus, select:focus {
   box-shadow: 0 0 0 4px var(--ring);
 }
 
-/* General-purpose chip base if needed elsewhere (used by filters) */
+/* General-purpose chip base if needed elsewhere (used by filters and toasts) */
 .chip {
   display: inline-flex;
   align-items: center;
