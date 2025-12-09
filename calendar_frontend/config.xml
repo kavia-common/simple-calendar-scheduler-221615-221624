@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" version="1.0.0" viewmodes="maximized">
+  <tizen:application id="1WvLnbZbZ1.tizen" package="1WvLnbZbZ1" required_version="8.0"/>
+  <feature name="http://tizen.org/feature/screen.size.all"/>
+  <icon src="icon.png"/>
+  <content src="index.html"/>
+  <name>myTizenApp</name>
+  <tizen:profile name="tizen"/>
+</widget>
